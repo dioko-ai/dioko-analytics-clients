@@ -1,9 +1,17 @@
+import { createBrowserContext, mergeContext, type EventContext } from './context.js';
+import { observeNavigation } from './navigation.js';
+export type { EventContext } from './context.js';
 export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 export type Properties = Record<string, JsonValue>;
-export interface EventContext { page_url?: string; referrer?: string; utm_source?: string; utm_medium?: string; utm_campaign?: string; utm_term?: string; utm_content?: string }
 export interface TrackOptions { anonymousId?: string; userId?: string; sessionId?: string; context?: EventContext }
 export interface AnalyticsOptions {
   endpoint: string; sourceKey: string; enabled?: boolean;
+  /** Capture initial and subsequent page views, website, referrer and UTM attribution. */
+  autoTrack?: boolean;
+  /** Attach Segment-shaped browser context to every event. */
+  fullContext?: boolean;
+  /** Default context for all events; per-event context takes precedence. */
+  context?: EventContext;
   flushIntervalMs?: number; batchSize?: number; maxQueueSize?: number;
   maxRetries?: number; retryDelayMs?: number; timeoutMs?: number;
   fetch?: typeof globalThis.fetch; onError?: (error: Error) => void;
@@ -37,6 +45,7 @@ export function createClient(config: AnalyticsOptions, transport?: TransportConf
   if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) throw new TypeError('Endpoint must be an HTTP(S) collector URL without credentials, query or fragment');
   if (url.pathname === '/') url.pathname = '/v1/batch';
   else if (url.pathname !== '/v1/batch') throw new TypeError('Endpoint must be a collector origin or /v1/batch URL');
+  for (const flag of [config.autoTrack, config.fullContext]) if (flag !== undefined && typeof flag !== 'boolean') throw new TypeError('Tracking flags must be booleans');
   const endpoint = url.href;
   const sourceKey = config.sourceKey;
   const batchSize = integer(config.batchSize, 20, 1, 100);
@@ -195,18 +204,21 @@ export function createClient(config: AnalyticsOptions, transport?: TransportConf
     validateJson(properties);
     const context = options.context ?? {};
     if (typeof context !== 'object' || Array.isArray(context) || (Object.getPrototypeOf(context) !== Object.prototype && Object.getPrototypeOf(context) !== null)) throw new TypeError('Context must be a plain object');
-    for (const [key, value] of Object.entries(context)) {
-      if (!['page_url', 'referrer', 'utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content'].includes(key)) throw new TypeError('Unknown context field');
-      if (value === undefined) continue;
-      if (typeof value !== 'string' || value.length > (key === 'page_url' || key === 'referrer' ? 2048 : 512)) throw new TypeError('Invalid context value');
-      if (key === 'page_url' || key === 'referrer') { const parsed = new URL(value); if (!['https:', 'http:'].includes(parsed.protocol)) throw new TypeError('Context URLs must use HTTP(S)'); }
+    // Undefined optional fields are omitted, as in the original flat context API.
+    for (const value of Object.values(context)) if (value !== undefined) validateJson(value);
+    for (const key of ['page_url', 'website', 'referrer', 'utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content']) {
+      const value = context[key];
+      if (value === undefined || (key === 'referrer' && value !== null && typeof value === 'object' && !Array.isArray(value))) continue;
+      if (typeof value !== 'string' || value.length > (['page_url', 'website', 'referrer'].includes(key) ? 2048 : 512)) throw new TypeError('Invalid context value');
+      if (['page_url', 'website', 'referrer'].includes(key)) { const parsed = new URL(value); if (!['https:', 'http:'].includes(parsed.protocol)) throw new TypeError('Context URLs must use HTTP(S)'); }
     }
     for (const value of [options.anonymousId, options.userId, options.sessionId]) if (value !== undefined && (typeof value !== 'string' || value.length > 256)) throw new TypeError('Identifiers must be strings up to 256 characters');
   }
   function track(name: string, properties: Properties = {}, options: TrackOptions = {}): string | null {
     if (!enabled || destroyed) return null;
     validateFields(name, properties, options);
-    const context = options.context ?? {};
+    const context = mergeContext(!serverMode && (config.autoTrack || config.fullContext) ? browserContext(config.fullContext ?? false) : undefined, defaultContext, options.context);
+    validateFields(name, properties, { ...options, context });
     const id = globalThis.crypto.randomUUID();
     const event = JSON.stringify({ event_id: id, event_name: name, occurred_at: new Date().toISOString(), anonymous_id: options.anonymousId, user_id: options.userId, session_id: options.sessionId, properties, context });
     if (bytes(event) > 32 * 1024) throw new TypeError('Event exceeds 32 KiB');
@@ -216,19 +228,35 @@ export function createClient(config: AnalyticsOptions, transport?: TransportConf
     if (queue.length >= batchSize) backgroundFlush(); else schedule();
     return id;
   }
+  validateFields('context', {}, { context: config.context });
+  const defaultContext = JSON.parse(JSON.stringify(config.context ?? {})) as EventContext;
+  const browserContext = createBrowserContext();
+  let stopNavigation: (() => void) | undefined;
+  const automaticPage = () => { if (enabled && !destroyed) try { page(); } catch (error) { report(error); } };
+  function startNavigation() {
+    if (!serverMode && config.autoTrack && enabled && !destroyed && !stopNavigation && typeof window !== 'undefined') {
+      stopNavigation = observeNavigation(automaticPage);
+      automaticPage();
+    }
+  }
+  function page(properties?: Properties, options: TrackOptions = {}): string | null {
+    if (!enabled || destroyed) return null;
+    const context: EventContext = {};
+    if (typeof location !== 'undefined' && /^https?:$/.test(location.protocol)) context.page_url = location.href;
+    if (typeof document !== 'undefined' && /^https?:\/\//i.test(document.referrer)) context.referrer = document.referrer;
+    // Full context uses Segment's nested referrer representation.
+    if (config.fullContext) delete context.referrer;
+    return track('page_view', properties, { ...options, context: mergeContext(context, defaultContext, options.context) });
+  }
   const online = () => { if (enabled && !destroyed) backgroundFlush(); };
   if (persistent && typeof window !== 'undefined') window.addEventListener('online', online);
   if (enabled) { restore(); schedule(); } else clearStored();
+  startNavigation();
   return {
     track,
-    page(properties, options = {}) {
-      const context: EventContext = {};
-      if (typeof location !== 'undefined' && /^https?:$/.test(location.protocol)) context.page_url = location.href;
-      if (typeof document !== 'undefined' && document.referrer) context.referrer = document.referrer;
-      return track('page_view', properties, { ...options, context: { ...context, ...options.context } });
-    },
+    page,
     flush,
-    setEnabled(value) { enabled = value; if (!value) { generation++; queue = []; inFlight = []; inFlightCount = 0; retryAt = 0; clearTimer(); controller?.abort(); cancelWait?.(); clearStored(); } else { restore(); schedule(); } },
-    destroy() { destroyed = true; retryAt = 0; generation++; queue = []; inFlight = []; inFlightCount = 0; clearTimer(); controller?.abort(); cancelWait?.(); if (persistent && typeof window !== 'undefined') window.removeEventListener('online', online); },
+    setEnabled(value) { if (destroyed) return; enabled = value; if (!value) { stopNavigation?.(); stopNavigation = undefined; generation++; queue = []; inFlight = []; inFlightCount = 0; retryAt = 0; clearTimer(); controller?.abort(); cancelWait?.(); clearStored(); } else { restore(); schedule(); startNavigation(); } },
+    destroy() { stopNavigation?.(); stopNavigation = undefined; destroyed = true; retryAt = 0; generation++; queue = []; inFlight = []; inFlightCount = 0; clearTimer(); controller?.abort(); cancelWait?.(); if (persistent && typeof window !== 'undefined') window.removeEventListener('online', online); },
   };
 }

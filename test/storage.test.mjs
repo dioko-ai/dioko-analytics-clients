@@ -45,6 +45,35 @@ test('opt-in queue survives reload with its original ID, timestamp, and properti
   assert.deepEqual(event.properties, { value: 'original' });
   assert.equal(storage.length, 0);
 });
+test('restored event keeps nested Segment context byte-for-byte without applying new defaults', async t => {
+  const { storage } = environment(t);
+  const suppliedContext = {
+    app: { name: 'checkout', version: '4.2.1' },
+    campaign: { name: 'spring', source: 'newsletter' },
+    page: { path: '/purchase', referrer: { type: 'document', url: 'https://from.example/' } },
+    referrer: { type: 'email', url: 'https://mail.example/click' },
+  };
+  const first = setup(t, { context: { app: { name: 'original-default' }, page: { path: '/default' } } });
+  const id = first.client.track('persistent_segment_context', { order: 7 }, { context: suppliedContext });
+  const stored = [...storage.entries.values()][0];
+  const original = JSON.parse(stored);
+  assert.equal(original.event_id, id);
+  assert.deepEqual(original.context, suppliedContext);
+  first.client.destroy();
+
+  const second = setup(t, {
+    fullContext: true,
+    context: { app: { name: 'new-default', version: '99' }, page: { path: '/new-default' }, campaign: { name: 'new-campaign' } },
+  });
+  await second.client.flush();
+  assert.equal(second.calls.length, 1);
+  assert.ok(second.calls[0].body.includes(stored), 'collector body contains the exact persisted event bytes');
+  const restored = JSON.parse(second.calls[0].body).events[0];
+  assert.equal(restored.event_id, original.event_id);
+  assert.equal(restored.occurred_at, original.occurred_at);
+  assert.deepEqual(restored.context, suppliedContext);
+  assert.equal(storage.length, 0);
+});
 test('failed delivery preserves durable queue while later success removes it', async t => {
   const { storage } = environment(t);
   let online = false;

@@ -103,13 +103,13 @@ test('construction and page calls work without browser globals and create no aut
   assert.equal(JSON.parse(calls[0].body).events[0].event_name, 'page_view');
 });
 
-test('rejects invalid names, non-JSON properties, unknown context, and secrets', t => {
+test('rejects invalid names, non-JSON properties, invalid context, and secrets', t => {
   const { client } = setup(t);
   for (const name of ['', '1event', 'event with spaces', 'a'.repeat(121)]) assert.throws(() => client.track(name));
   assert.throws(() => client.track('event', { value: BigInt(1) }));
   const cycle = {}; cycle.self = cycle;
   assert.throws(() => client.track('event', cycle));
-  assert.throws(() => client.track('event', {}, { context: { ip: '127.0.0.1' } }));
+  assert.throws(() => client.track('event', {}, { context: { page_url: 'file:///private' } }));
   assert.throws(() => createAnalytics({ endpoint: 'https://collect.example', sourceKey: 'sk_secret_never_in_browser_123' }));
 });
 

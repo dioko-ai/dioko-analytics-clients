@@ -1,12 +1,16 @@
-# Dioko Analytics clients
+# Dioko Analytics
 
-TypeScript clients for browsers and backends, with optional React bindings. Import it into your application bundle: no hosted script, runtime loader, or CDN dependency. Events are sent to your configured Dioko collector.
+Browser and backend analytics with TypeScript support and React bindings. Track page views, product events, campaign attribution, and customer context with one client library.
 
-This repository is independent of the private analytics backend. The proposed npm name is `@dioko/analytics`; it is not published yet and scope ownership must be confirmed before release.
+## Install
 
-## Usage
+```sh
+npm install @dioko/analytics
+```
 
-After publication, install with `npm install @dioko/analytics`. For local evaluation, build and pack this repository and install the resulting tarball in your application.
+## Browser quick start
+
+Create a browser source in your Dioko dashboard, add your website's origin, and initialize the client once:
 
 ```ts
 import { createAnalytics } from '@dioko/analytics';
@@ -14,49 +18,93 @@ import { createAnalytics } from '@dioko/analytics';
 export const analytics = createAnalytics({
   endpoint: 'https://analytics.example.com',
   sourceKey: 'pk_YOUR_PUBLIC_SOURCE_KEY',
-  enabled: false, // Enable when your application's consent policy permits.
-  storage: 'localStorage', // Optional: retain pending events across reloads.
-  onError: (error) => console.warn('Analytics delivery failed', error),
+  autoTrack: true,
+  fullContext: true,
 });
 
-analytics.setEnabled(true);
-analytics.page();
 analytics.track('signup_started', { plan: 'team' });
-await analytics.flush();
 ```
 
-Create a browser source in the Dioko dashboard and allow your application's exact origin (including the development port). Public source keys are intended for browser bundles; never use a server secret. Configure your Content Security Policy to allow the collector in `connect-src`. A same-origin reverse proxy is also possible.
+`autoTrack` records the initial page view and subsequent URL changes, including single-page app navigation through `pushState`, `replaceState`, back/forward navigation, and hash changes. Repeated navigation to the same URL does not create another automatic page view. It also adds website, page URL, referrer, and UTM attribution to every event.
 
-## Backend TypeScript
+`fullContext` adds Segment-shaped browser context to every event. The two flags are independent and default to `false`, so you can choose automatic page tracking, richer context, or both.
 
-Use a server source created in the dashboard. Keep its secret in your environment or secret manager, and import this entry point only in backend code:
+The client is bundled with your application and sends events directly to your collector. Use your public `pk_` source key in the browser. If your site uses a Content Security Policy, include your collector in `connect-src`.
+
+## Page views and attribution
+
+With `autoTrack: true`, events include these context fields:
+
+| Field | Value |
+| --- | --- |
+| `website` | Current website origin, such as `https://example.com` |
+| `page_url` | Current page URL, including query and fragment |
+| `referrer` | Document referrer when available |
+| `utm_source` | Campaign source |
+| `utm_medium` | Campaign medium |
+| `utm_campaign` | Campaign name |
+| `utm_term` | Campaign keyword |
+| `utm_content` | Campaign content |
+
+Campaign attribution stays in memory across navigation for the client's lifetime. A URL containing new UTM parameters replaces the previous campaign. Reloading the page starts attribution from the new page URL.
+
+To control page tracking through your router, leave `autoTrack` off and call `page()` after navigation:
 
 ```ts
-import { createServerAnalytics } from '@dioko/analytics/server';
-
-const analytics = createServerAnalytics({
-  endpoint: 'https://analytics.example.com',
-  secretKey: process.env.DIOKO_ANALYTICS_SECRET!,
-  onError: (error) => console.error('Analytics delivery failed', error),
-});
-
-analytics.track('invoice.paid', { amount: 4900, currency: 'USD' }, {
-  userId: 'customer-123',
-});
-
-// Await before a job exits or a serverless request finishes.
-await analytics.flush();
-// At application shutdown, flush pending events and dispose the client:
-await analytics.shutdown();
+analytics.page({ section: 'pricing' });
 ```
 
-The server client sends the secret as a bearer header, omits the public source key, and never adds browser Origin or visitor context. It uses batches of up to 100 events by default. Reuse one client per backend process; supply user/session identifiers per event. It has no React dependency or browser storage. Idle batching timers do not keep a Node process alive, so await `flush()` in jobs and serverless handlers. Active requests and retry waits remain alive until completion or cancellation.
+Manual `page()` calls record a `page_view` event and capture the current URL and document referrer. You can also call `page()` with `autoTrack` enabled to record an additional view explicitly.
 
-Server `flush()` rejects on delivery failure. Retryable failures retain events in memory for a later flush with the same IDs; permanent rejections discard that batch. Automatic flush failures also reach `onError`. `shutdown()` flushes and then destroys the client even if delivery fails, propagating the error. A collector `Retry-After` can extend flush/shutdown beyond the request timeout; call `destroy()` to cancel pending work if your shutdown deadline expires. This is an in-memory backend queue, not a durable job queue; use your application's outbox when delivery must survive process termination.
+## Full context
+
+Enable `fullContext: true` to collect browser context using [Segment's context field conventions](https://www.twilio.com/docs/segment/connections/spec/common):
+
+| Field | Automatically captured |
+| --- | --- |
+| `page` | `url`, `path`, `search`, `title`, `referrer` |
+| `campaign` | UTM parameters, with `utm_campaign` mapped to `name`; custom UTM parameters are included |
+| `library` | Package name and version |
+| `locale` | Browser language |
+| `userAgent` | Browser user agent |
+| `userAgentData` | Brands, mobile status, and platform when the browser exposes Client Hints |
+| `screen` | Width, height, and pixel density |
+| `timezone` | IANA timezone when available |
+| `channel` | `browser` |
+| `referrer` | `{ url }` when a document referrer is available |
+
+Full context also includes the flat website, page URL, and UTM fields. In this mode, `referrer` uses Segment's object representation; the referrer string is available at `page.referrer`.
+
+Add application-specific context at initialization or per event:
+
+```ts
+const analytics = createAnalytics({
+  endpoint: 'https://analytics.example.com',
+  sourceKey: 'pk_YOUR_PUBLIC_SOURCE_KEY',
+  autoTrack: true,
+  fullContext: true,
+  context: {
+    app: { name: 'Storefront', version: '2.1.0' },
+  },
+});
+
+analytics.track('checkout_started', { items: 2 }, {
+  userId: 'customer-123',
+  anonymousId: 'visitor-456',
+  sessionId: 'session-789',
+  context: {
+    groupId: 'company-123',
+    traits: { plan: 'team' },
+    page: { title: 'Checkout' },
+  },
+});
+```
+
+Per-event values override initialization values, which override automatic context. Nested dictionaries merge one level deep, so overriding `page.title` keeps the captured page URL and path. Context supports the full Segment field set, including `app`, `device`, `network`, `os`, `traits`, `ip`, and custom JSON fields. Supply fields that your application owns; browser collection does not infer device identifiers or make an external IP lookup. This is Segment-shaped context within Dioko's event format.
 
 ## React
 
-React is an optional peer dependency; applications using only the core client do not import it.
+Use the same client throughout your application:
 
 ```tsx
 import { AnalyticsProvider, useAnalytics } from '@dioko/analytics/react';
@@ -64,69 +112,112 @@ import { analytics } from './analytics';
 
 function SignupButton() {
   const analytics = useAnalytics();
-  return <button onClick={() => analytics.track('signup_started')}>Sign up</button>;
+  return (
+    <button onClick={() => analytics.track('signup_started')}>
+      Sign up
+    </button>
+  );
 }
 
 export function App() {
-  return <AnalyticsProvider client={analytics}><SignupButton /></AnalyticsProvider>;
+  return (
+    <AnalyticsProvider client={analytics}>
+      <SignupButton />
+    </AnalyticsProvider>
+  );
 }
 ```
 
-The provider does not record events or own the client's lifetime. Call `page()` explicitly from your router's navigation callback, once per completed navigation. This avoids assuming a router or generating page views during React rendering. Imports and provider rendering are safe during server rendering; do not track events from server renders or share visitor identity through a server singleton.
+Create the client once outside component rendering. With `autoTrack: true`, navigation tracking works independently of the provider. The provider supplies the client through React context; your application owns its lifetime. React is an optional peer dependency for the `/react` entry point.
 
-## Privacy and lifecycle
+For server-rendered applications, initialize the browser client in your browser entry point. Package imports and provider rendering work during server rendering; automatic browser collection starts when the client is created in a browser.
 
-There is no automatic tracking, cookie, fingerprinting, or identity creation. Storage is in memory by default; enabling `storage: 'localStorage'` writes pending event data to the browser until delivery or expiry. Other scripts on the same origin can read localStorage, so send only intended analytics data. `track()` sends only the supplied data. `page()` additionally reads the current page URL and referrer in a browser. URLs can contain sensitive query parameters: although the collector strips them before persistence, they travel to the collector. Supply sanitized URLs through `context` when needed. Properties are not automatically scrubbed.
+## Backend TypeScript
 
-Optional identity and context fields are passed as the third argument:
+Create a server source in the Dioko dashboard and store its secret in your environment:
 
 ```ts
-analytics.track('checkout_started', { items: 2 }, {
-  anonymousId: 'application-managed-id',
-  context: { page_url: 'https://example.com/checkout' },
+import { createServerAnalytics } from '@dioko/analytics/server';
+
+const analytics = createServerAnalytics({
+  endpoint: 'https://analytics.example.com',
+  secretKey: process.env.DIOKO_ANALYTICS_SECRET!,
+  context: { app: { name: 'Billing' } },
+});
+
+analytics.track('invoice.paid', { amount: 4900, currency: 'USD' }, {
+  userId: 'customer-123',
+});
+
+await analytics.flush();
+```
+
+Reuse one client per backend process and provide user/session identifiers per event. The server client authenticates with a bearer header and supports application-supplied context. Automatic browser tracking and browser storage are browser-client options.
+
+Await `flush()` before a job or serverless handler finishes. At application shutdown, use `await analytics.shutdown()` to flush and release the client. Server `flush()` rejects on delivery failure. Retryable failures retain events in memory for a later flush; permanent rejections discard that batch. `shutdown()` releases the client after attempting the final flush and propagates delivery errors.
+
+## Event delivery and storage
+
+The client batches events and retries network errors, rate limits, and server errors. Event IDs and payloads stay the same during retries.
+
+Enable browser persistence to retain pending events across reloads:
+
+```ts
+const analytics = createAnalytics({
+  endpoint: 'https://analytics.example.com',
+  sourceKey: 'pk_YOUR_PUBLIC_SOURCE_KEY',
+  autoTrack: true,
+  storage: 'localStorage',
+  onError: (error) => console.warn('Analytics delivery failed', error),
 });
 ```
 
-`setEnabled(false)` discards queued events, clears this client's persisted namespace, and aborts pending delivery. It cannot undo events already received by the server. Application consent must be coordinated across tabs; disabling one client does not disable an already-running client in another tab.
+Pending events remain in localStorage until delivery or expiry. The client retries on its timer and when the browser comes online. Storage is scoped by collector URL, source key, and optional `storageKey`. Multiple tabs keep separate event records; duplicate delivery uses the original event IDs for collector deduplication.
 
-Browser `destroy()` stops timers/listeners and discards the in-memory queue, but preserves persisted events for the next client instance. Call and await `flush()` first when immediate delivery is desired. There is no unload-delivery guarantee.
+The default queue is in memory. Use a backend outbox when events need to survive process restarts. Browser persistence depends on available browser storage; storage errors are reported through `onError` and collection continues in memory.
 
-## Browser offline persistence
+## Configuration
 
-With `storage: 'localStorage'`, the client saves events before sending and retains them during requests. Successful delivery removes them; network errors, HTTP 429, and server errors retain them after the immediate retry budget is exhausted. The client retries later on a timer or when the browser emits an `online` event, and restores pending events on the next enabled client instance. Permanent collector rejections remove the rejected batch.
-
-Events retain their original IDs and timestamps. Separate per-event storage records avoid one tab overwriting another tab's queue. Multiple tabs may deliver the same event, which the collector deduplicates in reports. Storage is scoped by collector URL, source key, and optional `storageKey` prefix.
-
-`retentionMs` defaults to seven days and cannot exceed thirty days. Expired or malformed records are discarded. The queue remains bounded by `maxQueueSize`. Browser storage can be blocked, cleared, or exhausted; storage errors reach `onError`, with an in-memory fallback. Persistence improves recovery but cannot guarantee delivery. Initialize with `enabled: false` when consent is required; this clears any previous backlog in that namespace and does not restore or send stored events.
-
-## Delivery options
-
-| Option | Default | Meaning |
+| Option | Default | Description |
 | --- | --- | --- |
-| `enabled` | `true` | Allow collection; initialize with `false` when consent is required |
+| `endpoint` | Required | Collector origin or `/v1/batch` URL |
+| `sourceKey` | Required in browser | Public browser source key |
+| `secretKey` | Required on server | Server source secret; use the `/server` entry point |
+| `autoTrack` | `false` | Browser: automatic page views and website/referrer/UTM capture |
+| `fullContext` | `false` | Browser: Segment-shaped context on all events |
+| `context` | `{}` | Default event context |
+| `enabled` | `true` | Whether the client collects and delivers events |
 | `batchSize` | Browser `20`, server `100` | Flush threshold and maximum events per request (1–100) |
-| `flushIntervalMs` | `5000` | Delay before sending a partial batch; `0` disables the partial-batch timer; retained failures still schedule retries |
-| `maxQueueSize` | `1000` | Maximum queued and in-flight events; new events are dropped when full |
-| `maxRetries` | `3` | Additional attempts for network errors, rate limits, and server errors |
-| `retryDelayMs` | `1000` | Initial exponential backoff; `Retry-After` can extend the delay |
+| `flushIntervalMs` | `5000` | Partial-batch delay; `0` disables this timer; retained failures still schedule retries |
+| `maxQueueSize` | `1000` | Maximum queued and in-flight events |
+| `maxRetries` | `3` | Additional delivery attempts |
+| `retryDelayMs` | `1000` | Initial exponential backoff; collector `Retry-After` is honored |
 | `timeoutMs` | `10000` | Timeout per request |
-| `storage` | In memory | Browser only: `'localStorage'` enables persistence |
+| `storage` | In memory | Browser: `'localStorage'` retains pending events across reloads |
 | `storageKey` | `'dioko-analytics'` | Browser storage namespace prefix |
-| `retentionMs` | `604800000` (7 days) | Browser persisted-event lifetime |
+| `retentionMs` | `604800000` (7 days) | Persisted-event lifetime, up to 30 days |
+| `onError` | — | Delivery, storage, and automatic collection error callback |
+| `fetch` | Global Fetch | Custom Fetch implementation |
 
-`track()` returns the event UUID, or `null` when disabled, destroyed, or full. Invalid data throws synchronously. Transport failures and dropped events are reported to `onError`; browser `flush()` resolves after attempts finish and does **not** guarantee acceptance. Server `flush()` rejects on delivery failure. Retries reuse the original event IDs and payload. The collector deduplicates reports by event ID.
+## Client methods
 
-The client targets modern browsers with Fetch, AbortController, and `crypto.randomUUID()` (HTTPS or localhost). The package ships ESM and TypeScript declarations; CommonJS is not provided. Use the `/server` entry point for server-source credentials.
+| Method | Behavior |
+| --- | --- |
+| `track(name, properties?, options?)` | Queue an event; return its UUID, or `null` when disabled, destroyed, or full |
+| `page(properties?, options?)` | Browser: queue a `page_view` event |
+| `flush()` | Send pending events; await completion of delivery attempts |
+| `setEnabled(false)` | Stop collection, remove automatic navigation listeners, discard queued events, clear persisted events, and abort pending delivery |
+| `setEnabled(true)` | Resume collection; automatic tracking records the current page when resumed |
+| `destroy()` | Stop timers/listeners and discard the in-memory queue; preserve browser persisted events for the next client |
+| `shutdown()` | Server: flush and destroy the client |
 
-## Development
+Call `await analytics.flush()` before `destroy()` to send pending events immediately. Browser `flush()` reports delivery errors through `onError`; server `flush()` also rejects. Automatic collection errors reach `onError`. Invalid explicit event data throws synchronously. Events accept finite JSON values and are limited to 32 KiB each, with batches up to 256 KiB.
 
-```sh
-npm ci
-npm run check
-npm pack --dry-run
-```
+Collection can be switched at runtime through `setEnabled()`. Initialize with `enabled: false` when your application needs to wait before starting analytics. Automatic collection includes page URLs and query parameters; use context overrides to customize what your application sends. User and session identifiers come from your application.
 
-See [RELEASING.md](RELEASING.md) before making this repository public or publishing a package.
+## Compatibility
+
+ESM with TypeScript declarations. Browser clients use Fetch, AbortController, and `crypto.randomUUID()` on HTTPS or localhost. Backend clients support Node.js 22 and later. React bindings support React 18 and 19.
 
 ## License
 
