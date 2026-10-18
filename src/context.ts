@@ -1,6 +1,6 @@
 import type { JsonValue, Properties } from './internal.js';
 
-/** Segment context fields, plus Dioko's flat website attribution fields. */
+/** Detailed event context fields, plus flat website attribution fields. */
 export interface EventContext {
   [key: string]: JsonValue | undefined;
   page_url?: string;

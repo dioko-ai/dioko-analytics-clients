@@ -8,7 +8,9 @@ export interface AnalyticsOptions {
   endpoint: string; sourceKey: string; enabled?: boolean;
   /** Capture initial and subsequent page views, website, referrer and UTM attribution. */
   autoTrack?: boolean;
-  /** Attach Segment-shaped browser context to every event. */
+  /** Persist a browser anonymous ID; always enabled by autoTrack. */
+  autoAnonymousId?: boolean;
+  /** Attach detailed browser context to every event. */
   fullContext?: boolean;
   /** Default context for all events; per-event context takes precedence. */
   context?: EventContext;
@@ -45,7 +47,7 @@ export function createClient(config: AnalyticsOptions, transport?: TransportConf
   if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) throw new TypeError('Endpoint must be an HTTP(S) collector URL without credentials, query or fragment');
   if (url.pathname === '/') url.pathname = '/v1/batch';
   else if (url.pathname !== '/v1/batch') throw new TypeError('Endpoint must be a collector origin or /v1/batch URL');
-  for (const flag of [config.autoTrack, config.fullContext]) if (flag !== undefined && typeof flag !== 'boolean') throw new TypeError('Tracking flags must be booleans');
+  for (const flag of [config.autoTrack, config.autoAnonymousId, config.fullContext]) if (flag !== undefined && typeof flag !== 'boolean') throw new TypeError('Tracking flags must be booleans');
   const endpoint = url.href;
   const sourceKey = config.sourceKey;
   const batchSize = integer(config.batchSize, 20, 1, 100);
@@ -76,6 +78,39 @@ export function createClient(config: AnalyticsOptions, transport?: TransportConf
     if (!persistent) return undefined;
     try { if (!globalThis.localStorage) throw new Error('localStorage is unavailable'); return globalThis.localStorage; }
     catch (error) { report(error); return undefined; }
+  };
+  const automaticIdentity = !serverMode && typeof window !== 'undefined' && (config.autoTrack === true || config.autoAnonymousId === true);
+  // Keep identity outside the queue namespace so queue restoration and removal cannot touch it.
+  const identityKey = `${config.storageKey ?? 'dioko-analytics'}:anonymous-id:${encodeURIComponent(endpoint)}:${sourceKey}`;
+  let anonymousId: string | undefined;
+  let identityStorageFailed = false;
+  const identityStorage = (): Storage | undefined => {
+    if (!automaticIdentity || identityStorageFailed) return undefined;
+    try {
+      if (!globalThis.localStorage) throw new Error('localStorage is unavailable');
+      return globalThis.localStorage;
+    } catch (error) { identityStorageFailed = true; report(error); return undefined; }
+  };
+  const clearIdentity = () => {
+    anonymousId = undefined;
+    // Retry removal after a previous storage failure, since consent has been withdrawn.
+    identityStorageFailed = false;
+    const store = identityStorage();
+    if (store) try { store.removeItem(identityKey); } catch (error) { identityStorageFailed = true; report(error); }
+  };
+  const getAnonymousId = (): string | undefined => {
+    if (!automaticIdentity) return undefined;
+    if (anonymousId !== undefined) return anonymousId;
+    const store = identityStorage();
+    if (store) try {
+      const stored = store.getItem(identityKey);
+      if (stored !== null && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(stored)) anonymousId = stored;
+    } catch (error) { identityStorageFailed = true; report(error); }
+    if (anonymousId === undefined) {
+      anonymousId = globalThis.crypto.randomUUID();
+      if (store && !identityStorageFailed) try { store.setItem(identityKey, anonymousId); } catch (error) { identityStorageFailed = true; report(error); }
+    }
+    return anonymousId;
   };
   const eventKey = (event: string) => prefix + (JSON.parse(event) as { event_id: string }).event_id;
   const storedKeys = (store: Storage) => {
@@ -220,7 +255,7 @@ export function createClient(config: AnalyticsOptions, transport?: TransportConf
     const context = mergeContext(!serverMode && (config.autoTrack || config.fullContext) ? browserContext(config.fullContext ?? false) : undefined, defaultContext, options.context);
     validateFields(name, properties, { ...options, context });
     const id = globalThis.crypto.randomUUID();
-    const event = JSON.stringify({ event_id: id, event_name: name, occurred_at: new Date().toISOString(), anonymous_id: options.anonymousId, user_id: options.userId, session_id: options.sessionId, properties, context });
+    const event = JSON.stringify({ event_id: id, event_name: name, occurred_at: new Date().toISOString(), anonymous_id: options.anonymousId ?? getAnonymousId(), user_id: options.userId, session_id: options.sessionId, properties, context });
     if (bytes(event) > 32 * 1024) throw new TypeError('Event exceeds 32 KiB');
     if (queue.length + inFlightCount >= maxQueue) { report(new Error('Analytics queue is full; event dropped')); return null; }
     queue.push(event);
@@ -244,19 +279,19 @@ export function createClient(config: AnalyticsOptions, transport?: TransportConf
     const context: EventContext = {};
     if (typeof location !== 'undefined' && /^https?:$/.test(location.protocol)) context.page_url = location.href;
     if (typeof document !== 'undefined' && /^https?:\/\//i.test(document.referrer)) context.referrer = document.referrer;
-    // Full context uses Segment's nested referrer representation.
+    // Full context uses the nested referrer representation.
     if (config.fullContext) delete context.referrer;
     return track('page_view', properties, { ...options, context: mergeContext(context, defaultContext, options.context) });
   }
   const online = () => { if (enabled && !destroyed) backgroundFlush(); };
   if (persistent && typeof window !== 'undefined') window.addEventListener('online', online);
-  if (enabled) { restore(); schedule(); } else clearStored();
+  if (enabled) { restore(); schedule(); } else { clearStored(); clearIdentity(); }
   startNavigation();
   return {
     track,
     page,
     flush,
-    setEnabled(value) { if (destroyed) return; enabled = value; if (!value) { stopNavigation?.(); stopNavigation = undefined; generation++; queue = []; inFlight = []; inFlightCount = 0; retryAt = 0; clearTimer(); controller?.abort(); cancelWait?.(); clearStored(); } else { restore(); schedule(); startNavigation(); } },
+    setEnabled(value) { if (destroyed) return; enabled = value; if (!value) { stopNavigation?.(); stopNavigation = undefined; generation++; queue = []; inFlight = []; inFlightCount = 0; retryAt = 0; clearTimer(); controller?.abort(); cancelWait?.(); clearStored(); clearIdentity(); } else { restore(); schedule(); startNavigation(); } },
     destroy() { stopNavigation?.(); stopNavigation = undefined; destroyed = true; retryAt = 0; generation++; queue = []; inFlight = []; inFlightCount = 0; clearTimer(); controller?.abort(); cancelWait?.(); if (persistent && typeof window !== 'undefined') window.removeEventListener('online', online); },
   };
 }

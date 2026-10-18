@@ -25,9 +25,9 @@ export const analytics = createAnalytics({
 analytics.track('signup_started', { plan: 'team' });
 ```
 
-`autoTrack` records the initial page view and subsequent URL changes, including single-page app navigation through `pushState`, `replaceState`, back/forward navigation, and hash changes. Repeated navigation to the same URL does not create another automatic page view. It also adds website, page URL, referrer, and UTM attribution to every event.
+`autoTrack` records the initial page view and subsequent URL changes, including single-page app navigation through `pushState`, `replaceState`, back/forward navigation, and hash changes. Repeated navigation to the same URL does not create another automatic page view. It also assigns a persistent anonymous visitor ID and adds website, page URL, referrer, and UTM attribution to every event.
 
-`fullContext` adds Segment-shaped browser context to every event. The two flags are independent and default to `false`, so you can choose automatic page tracking, richer context, or both.
+`fullContext` adds detailed browser context to every event. The two flags are independent and default to `false`, so you can choose automatic page tracking, richer context, or both.
 
 The client is bundled with your application and sends events directly to your collector. Use your public `pk_` source key in the browser. If your site uses a Content Security Policy, include your collector in `connect-src`.
 
@@ -56,9 +56,29 @@ analytics.page({ section: 'pricing' });
 
 Manual `page()` calls record a `page_view` event and capture the current URL and document referrer. You can also call `page()` with `autoTrack` enabled to record an additional view explicitly.
 
+## Anonymous visitor IDs
+
+`autoTrack: true` automatically enables anonymous visitor IDs. To assign IDs without automatic page tracking, enable `autoAnonymousId` on its own:
+
+```ts
+const analytics = createAnalytics({
+  endpoint: 'https://analytics.example.com',
+  sourceKey: 'pk_YOUR_PUBLIC_SOURCE_KEY',
+  autoAnonymousId: true,
+});
+
+analytics.track('signup_started');
+```
+
+The browser generates a UUID and attaches it as `anonymous_id` to events, including automatic page views. The ID is saved in localStorage across reloads and client instances, scoped by collector URL, source key, and `storageKey`. This works independently of pending-event persistence. If browser storage is unavailable, the client keeps the ID in memory and reports storage errors through `onError`.
+
+An explicit event option such as `{ anonymousId: 'visitor-456' }` overrides the ID for that event without changing the saved visitor ID. With `autoTrack: true`, anonymous IDs stay enabled even if `autoAnonymousId` is `false`. With both options off, events only include anonymous IDs supplied by your application. `fullContext` alone does not enable IDs.
+
+No ID is created or read while the client is disabled or during server rendering. `setEnabled(false)` clears the saved ID; resuming collection creates a new one. `destroy()` preserves the ID for the next browser client. The server client accepts application-supplied IDs and does not generate browser visitor IDs.
+
 ## Full context
 
-Enable `fullContext: true` to collect browser context using [Segment's context field conventions](https://www.twilio.com/docs/segment/connections/spec/common):
+Enable `fullContext: true` to attach structured browser context:
 
 | Field | Automatically captured |
 | --- | --- |
@@ -73,7 +93,7 @@ Enable `fullContext: true` to collect browser context using [Segment's context f
 | `channel` | `browser` |
 | `referrer` | `{ url }` when a document referrer is available |
 
-Full context also includes the flat website, page URL, and UTM fields. In this mode, `referrer` uses Segment's object representation; the referrer string is available at `page.referrer`.
+Full context also includes the flat website, page URL, and UTM fields. In this mode, `referrer` is an object containing `url`; the referrer string is available at `page.referrer`.
 
 Add application-specific context at initialization or per event:
 
@@ -100,7 +120,7 @@ analytics.track('checkout_started', { items: 2 }, {
 });
 ```
 
-Per-event values override initialization values, which override automatic context. Nested dictionaries merge one level deep, so overriding `page.title` keeps the captured page URL and path. Context supports the full Segment field set, including `app`, `device`, `network`, `os`, `traits`, `ip`, and custom JSON fields. Supply fields that your application owns; browser collection does not infer device identifiers or make an external IP lookup. This is Segment-shaped context within Dioko's event format.
+Per-event values override initialization values, which override automatic context. Nested dictionaries merge one level deep, so overriding `page.title` keeps the captured page URL and path. Context supports `app`, `device`, `network`, `os`, `traits`, `ip`, and custom JSON fields. Supply fields that your application owns; browser collection does not infer device identifiers or make an external IP lookup.
 
 ## React
 
@@ -183,8 +203,9 @@ The default queue is in memory. Use a backend outbox when events need to survive
 | `endpoint` | Required | Collector origin or `/v1/batch` URL |
 | `sourceKey` | Required in browser | Public browser source key |
 | `secretKey` | Required on server | Server source secret; use the `/server` entry point |
-| `autoTrack` | `false` | Browser: automatic page views and website/referrer/UTM capture |
-| `fullContext` | `false` | Browser: Segment-shaped context on all events |
+| `autoTrack` | `false` | Browser: automatic page views, anonymous visitor IDs, and website/referrer/UTM capture |
+| `autoAnonymousId` | `false` | Browser: persistent anonymous visitor IDs; always enabled by `autoTrack` |
+| `fullContext` | `false` | Browser: detailed context on all events |
 | `context` | `{}` | Default event context |
 | `enabled` | `true` | Whether the client collects and delivers events |
 | `batchSize` | Browser `20`, server `100` | Flush threshold and maximum events per request (1–100) |
@@ -206,7 +227,7 @@ The default queue is in memory. Use a backend outbox when events need to survive
 | `track(name, properties?, options?)` | Queue an event; return its UUID, or `null` when disabled, destroyed, or full |
 | `page(properties?, options?)` | Browser: queue a `page_view` event |
 | `flush()` | Send pending events; await completion of delivery attempts |
-| `setEnabled(false)` | Stop collection, remove automatic navigation listeners, discard queued events, clear persisted events, and abort pending delivery |
+| `setEnabled(false)` | Stop collection, remove automatic navigation listeners, discard queued events, clear persisted events and the anonymous visitor ID, and abort pending delivery |
 | `setEnabled(true)` | Resume collection; automatic tracking records the current page when resumed |
 | `destroy()` | Stop timers/listeners and discard the in-memory queue; preserve browser persisted events for the next client |
 | `shutdown()` | Server: flush and destroy the client |

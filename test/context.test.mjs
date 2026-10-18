@@ -5,13 +5,15 @@ import { createServerAnalytics } from '../dist/server.js';
 
 function browser(t) {
   const window = new EventTarget();
+  const saved = new Map();
+  window.localStorage = { getItem: key => saved.get(key) ?? null, setItem: (key, value) => saved.set(key, value), removeItem: key => saved.delete(key) };
   window.location = new URL('https://shop.example/start?utm_source=email&utm_campaign=launch&utm_content=a&utm_content=b&utm_custom=custom');
   window.history = {
     pushState(_state, _title, url) { if (url != null) window.location.href = new URL(url, window.location.href).href; },
     replaceState(_state, _title, url) { if (url != null) window.location.href = new URL(url, window.location.href).href; },
   };
   Object.assign(window, { navigator: { language: 'en-US', userAgent: 'Test Browser', userAgentData: { brands: [{ brand: 'Test', version: '1' }], mobile: false, platform: 'Test OS' } }, screen: { width: 1920, height: 1080 }, devicePixelRatio: 2 });
-  const values = { window, location: window.location, document: { referrer: 'https://search.example/results', title: 'Shop' } };
+  const values = { window, localStorage: window.localStorage, location: window.location, document: { referrer: 'https://search.example/results', title: 'Shop' } };
   const previous = new Map();
   for (const [key, value] of Object.entries(values)) {
     previous.set(key, Object.getOwnPropertyDescriptor(globalThis, key));
@@ -63,7 +65,7 @@ test('autoTrack captures initial page and SPA navigation with attribution on eve
   assert.deepEqual(errors, []);
 });
 
-test('fullContext independently enriches events using Segment browser fields', async t => {
+test('fullContext independently enriches events using browser fields', async t => {
   browser(t);
   const { client, events } = setup(t, { fullContext: true });
   client.track('manual');
@@ -154,14 +156,16 @@ test('SSR with flags does not auto-track and accepts rich supplied context', asy
   client.track('explicit');
   await client.flush();
   assert.deepEqual(events[0].context, { app: { name: 'SSR' } });
+  assert.equal(events[0].anonymous_id, undefined);
 });
 
-test('server accepts supplied Segment context and ignores browser flags from untyped callers', async t => {
+test('server accepts supplied rich context and ignores browser flags from untyped callers', async t => {
   const events = [];
-  const client = createServerAnalytics({ endpoint: 'https://collect.example', secretKey: 'sk_test_server_secret_1234567890', autoTrack: true, fullContext: true, flushIntervalMs: 0,
+  const client = createServerAnalytics({ endpoint: 'https://collect.example', secretKey: 'sk_test_server_secret_1234567890', autoTrack: true, autoAnonymousId: true, fullContext: true, flushIntervalMs: 0,
     context: { app: { name: 'Billing' } }, fetch: async (_url, init) => { events.push(...JSON.parse(init.body).events); return new Response('{}', { status: 202 }); } });
   t.after(() => client.destroy());
   client.track('invoice.paid', {}, { context: { groupId: 'company', traits: { plan: 'team' } } });
   await client.flush();
   assert.deepEqual(events[0].context, { app: { name: 'Billing' }, groupId: 'company', traits: { plan: 'team' } });
+  assert.equal(events[0].anonymous_id, undefined);
 });

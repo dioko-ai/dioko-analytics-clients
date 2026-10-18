@@ -45,7 +45,7 @@ test('opt-in queue survives reload with its original ID, timestamp, and properti
   assert.deepEqual(event.properties, { value: 'original' });
   assert.equal(storage.length, 0);
 });
-test('restored event keeps nested Segment context byte-for-byte without applying new defaults', async t => {
+test('restored event keeps nested rich context byte-for-byte without applying new defaults', async t => {
   const { storage } = environment(t);
   const suppliedContext = {
     app: { name: 'checkout', version: '4.2.1' },
@@ -54,7 +54,7 @@ test('restored event keeps nested Segment context byte-for-byte without applying
     referrer: { type: 'email', url: 'https://mail.example/click' },
   };
   const first = setup(t, { context: { app: { name: 'original-default' }, page: { path: '/default' } } });
-  const id = first.client.track('persistent_segment_context', { order: 7 }, { context: suppliedContext });
+  const id = first.client.track('persistent_rich_context', { order: 7 }, { context: suppliedContext });
   const stored = [...storage.entries.values()][0];
   const original = JSON.parse(stored);
   assert.equal(original.event_id, id);
