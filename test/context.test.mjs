@@ -1,7 +1,10 @@
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createAnalytics } from '../dist/index.js';
 import { createServerAnalytics } from '../dist/server.js';
+
+const { name, version } = JSON.parse(readFileSync(new URL('../package.json', import.meta.url)));
 
 function browser(t) {
   const window = new EventTarget();
@@ -75,7 +78,7 @@ test('fullContext independently enriches events using browser fields', async t =
   assert.deepEqual(context.page, { path: '/start', referrer: 'https://search.example/results', search: '?utm_source=email&utm_campaign=launch&utm_content=a&utm_content=b&utm_custom=custom', title: 'Shop', url: globalThis.location.href });
   assert.deepEqual(context.campaign, { source: 'email', name: 'launch', content: 'b', custom: 'custom' });
   assert.deepEqual(context.referrer, { url: 'https://search.example/results' });
-  assert.deepEqual(context.library, { name: '@dioko/analytics', version: '0.1.0' });
+  assert.deepEqual(context.library, { name, version });
   assert.equal(context.userAgent, 'Test Browser');
   assert.equal(context.locale, 'en-US');
   assert.equal(context.channel, 'browser');

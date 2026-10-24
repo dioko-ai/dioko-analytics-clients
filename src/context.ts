@@ -1,3 +1,4 @@
+import { library } from './version.js';
 import type { JsonValue, Properties } from './internal.js';
 
 /** Detailed event context fields, plus flat website attribution fields. */
@@ -50,7 +51,7 @@ export function createBrowserContext() {
     context.page = { path: url.pathname, referrer, search: url.search, title: typeof document === 'undefined' ? '' : document.title, url: url.href };
     if (Object.keys(campaign).length) context.campaign = { ...campaign };
     if (context.referrer) context.referrer = { url: referrer };
-    context.library = { name: '@dioko/analytics', version: '0.1.0' };
+    context.library = { ...library };
     context.channel = 'browser';
     const nav = window.navigator;
     if (nav) {

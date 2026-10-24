@@ -28,8 +28,8 @@
     }
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "build": "node scripts/version.mjs && tsc -p tsconfig.json",
+    "typecheck": "node scripts/version.mjs && tsc -p tsconfig.json --noEmit",
     "test": "npm run build && node --test test/*.test.mjs",
     "prepack": "npm run build",
     "check": "npm run typecheck && npm test"
@@ -53,5 +53,13 @@
   },
   "publishConfig": {
     "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dioko-ai/dioko-analytics-clients.git"
+  },
+  "homepage": "https://github.com/dioko-ai/dioko-analytics-clients#readme",
+  "bugs": {
+    "url": "https://github.com/dioko-ai/dioko-analytics-clients/issues"
   }
 }

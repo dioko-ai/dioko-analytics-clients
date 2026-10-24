@@ -1,0 +1,72 @@
+name: Publish
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: npm-release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - name: Detect version bump
+        id: release
+        run: node scripts/release.mjs plan
+      - name: Install dependencies
+        if: steps.release.outputs.release == 'true'
+        run: npm ci
+      - name: Check
+        if: steps.release.outputs.release == 'true'
+        run: npm run check
+      - name: Build release tarball
+        if: steps.release.outputs.release == 'true'
+        id: pack
+        run: |
+          mkdir -p "$RUNNER_TEMP/npm-release"
+          npm pack --json --pack-destination "$RUNNER_TEMP/npm-release" > "$RUNNER_TEMP/pack.json"
+          node --input-type=module -e '
+            import fs from "node:fs";
+            import path from "node:path";
+            const [pack] = JSON.parse(fs.readFileSync(path.join(process.env.RUNNER_TEMP, "pack.json")));
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, `tarball=${path.join(process.env.RUNNER_TEMP, "npm-release", pack.filename)}\n`);
+          '
+      - name: Test packaged exports
+        if: steps.release.outputs.release == 'true'
+        env:
+          TARBALL: ${{ steps.pack.outputs.tarball }}
+        run: node scripts/smoke-package.mjs "$TARBALL"
+      - name: Save release artifact
+        if: steps.release.outputs.release == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-${{ steps.release.outputs.version }}
+          path: ${{ steps.pack.outputs.tarball }}
+      - name: Publish to npm
+        if: steps.release.outputs.release == 'true'
+        env:
+          TARBALL: ${{ steps.pack.outputs.tarball }}
+        run: node scripts/release.mjs publish "$TARBALL"
+      - name: Create tag and GitHub Release
+        if: steps.release.outputs.release == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/github-release.mjs
