@@ -236,6 +236,20 @@ Call `await analytics.flush()` before `destroy()` to send pending events immedia
 
 Collection can be switched at runtime through `setEnabled()`. Initialize with `enabled: false` when your application needs to wait before starting analytics. Automatic collection includes page URLs and query parameters; use context overrides to customize what your application sends. User and session identifiers come from your application.
 
+### Form submissions
+
+Use the browser client to submit a JSON record directly to a form endpoint. The form must allow the page origin and be associated with the configured browser source.
+
+```ts
+const form = analytics.createForm({ endpoint: 'https://collect.example.com/v1/forms/form_12345678-1234-4234-8234-123456789abc' });
+const result = await form.submit({ email: 'person@example.com' });
+if (result.redirectUrl) window.location.assign(result.redirectUrl);
+```
+
+`submit(fields, options)` accepts `anonymousId`, `userId`, `sessionId`, `context`, `submissionId` (UUID), and `signal`. It immediately sends a JSON request, using the analytics client's fetch and timeout; form fields are never queued or stored by the SDK. It returns `{ submissionId, formId, redirectUrl }` and does not navigate automatically. A successful submission queues a best-effort `form_submitted` event with only the form and submission IDs as properties. Within one client instance, the most recent 1,000 successfully queued form events are deduplicated on replay; this is not a durable or cross-instance guarantee. When analytics is disabled, submissions still work but contain no analytics identity or context and produce no event. The form endpoint may use a different host without changing analytics identity scope. Server analytics does not expose this browser helper.
+
+There are no automatic form retries. To retry an uncertain request, provide the same `submissionId` and the same fields and metadata; each call takes a fresh identity and context snapshot, so keep those options and page context stable. Reusing an ID with different data can return a conflict (409). The API limits requests to 64 KiB, field keys to 200 characters, and the entire JSON body to 500 values and depth 10. HTTP and validation errors reject the promise; cancellation uses `signal`.
+
 ## Compatibility
 
 ESM with TypeScript declarations. Browser clients use Fetch, AbortController, and `crypto.randomUUID()` on HTTPS or localhost. Backend clients support Node.js 22 and later. React bindings support React 18 and 19.

@@ -19,7 +19,11 @@ export interface AnalyticsOptions {
   fetch?: typeof globalThis.fetch; onError?: (error: Error) => void;
   storage?: 'localStorage'; storageKey?: string; retentionMs?: number;
 }
+export interface FormOptions extends TrackOptions { submissionId?: string; signal?: AbortSignal }
+export interface FormResult { submissionId: string; formId: string; redirectUrl: string | null }
+export interface AnalyticsForm { submit(fields: Properties, options?: FormOptions): Promise<FormResult> }
 export interface Analytics {
+  createForm(options: { endpoint: string }): AnalyticsForm;
   track(name: string, properties?: Properties, options?: TrackOptions): string | null;
   page(properties?: Properties, options?: TrackOptions): string | null;
   flush(): Promise<void>; setEnabled(enabled: boolean): void; destroy(): void;
@@ -38,6 +42,21 @@ function validateJson(value: unknown, ancestors = new Set<object>()): void {
   ancestors.add(value);
   for (const entry of Array.isArray(value) ? value : Object.values(value)) validateJson(entry, ancestors);
   ancestors.delete(value);
+}
+
+function formContext(input: EventContext): EventContext {
+  const output: EventContext = {};
+  const text = (v: unknown, max: number) => typeof v === 'string' && v.length <= max;
+  const url = (v: unknown) => { if (!text(v, 2048)) return false; try { return ['http:', 'https:'].includes(new URL(v as string).protocol); } catch { return false; } };
+  for (const key of ['page_url', 'website', 'referrer']) { const v = input[key]; if (url(v)) output[key] = v; }
+  if (!output.referrer && input.referrer && typeof input.referrer === 'object' && !Array.isArray(input.referrer) && url(input.referrer.url)) output.referrer = input.referrer.url as string;
+  for (const key of ['utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content', 'channel', 'locale', 'userAgent', 'timezone']) { const v = input[key]; if (text(v, key === 'userAgent' ? 2048 : ['channel', 'locale', 'timezone'].includes(key) ? 100 : 512)) output[key] = v; }
+  const obj = (v: unknown): Record<string, unknown> | undefined => v && typeof v === 'object' && !Array.isArray(v) ? v as Record<string, unknown> : undefined;
+  const page = obj(input.page); if (page) { const p: Properties = {}; for (const key of ['path', 'search', 'title']) if (text(page[key], 2048)) p[key] = page[key] as string; if (url(page.url)) p.url = page.url as string; if (page.referrer === '' || url(page.referrer)) p.referrer = page.referrer as string; output.page = p; }
+  const lib = obj(input.library); if (lib && text(lib.name, 256) && text(lib.version, 100)) output.library = { name: lib.name as string, version: lib.version as string };
+  const screen = obj(input.screen); if (screen && typeof screen.width === 'number' && screen.width >= 0 && typeof screen.height === 'number' && screen.height >= 0 && typeof screen.density === 'number' && screen.density > 0) output.screen = { width: screen.width, height: screen.height, density: screen.density };
+  const ua = obj(input.userAgentData); if (ua && Array.isArray(ua.brands) && ua.brands.length <= 20 && ua.brands.every((b: unknown) => { const x = obj(b); return x && text(x.brand, 256) && text(x.version, 100); }) && typeof ua.mobile === 'boolean' && text(ua.platform, 256)) output.userAgentData = { brands: ua.brands.map((b: Record<string, string>) => ({ brand: b.brand!, version: b.version! })), mobile: ua.mobile, platform: ua.platform as string };
+  return output;
 }
 export interface TransportConfig { headers: Record<string, string>; batchPrefix: string; rejectFailures: boolean }
 export function createClient(config: AnalyticsOptions, transport?: TransportConfig): Analytics {
@@ -249,13 +268,13 @@ export function createClient(config: AnalyticsOptions, transport?: TransportConf
     }
     for (const value of [options.anonymousId, options.userId, options.sessionId]) if (value !== undefined && (typeof value !== 'string' || value.length > 256)) throw new TypeError('Identifiers must be strings up to 256 characters');
   }
-  function track(name: string, properties: Properties = {}, options: TrackOptions = {}): string | null {
+  function track(name: string, properties: Properties = {}, options: TrackOptions = {}, captured = false): string | null {
     if (!enabled || destroyed) return null;
     validateFields(name, properties, options);
-    const context = mergeContext(!serverMode && (config.autoTrack || config.fullContext) ? browserContext(config.fullContext ?? false) : undefined, defaultContext, options.context);
+    const context = captured ? options.context ?? {} : mergeContext(!serverMode && (config.autoTrack || config.fullContext) ? browserContext(config.fullContext ?? false) : undefined, defaultContext, options.context);
     validateFields(name, properties, { ...options, context });
     const id = globalThis.crypto.randomUUID();
-    const event = JSON.stringify({ event_id: id, event_name: name, occurred_at: new Date().toISOString(), anonymous_id: options.anonymousId ?? getAnonymousId(), user_id: options.userId, session_id: options.sessionId, properties, context });
+    const event = JSON.stringify({ event_id: id, event_name: name, occurred_at: new Date().toISOString(), anonymous_id: captured ? options.anonymousId : options.anonymousId ?? getAnonymousId(), user_id: options.userId, session_id: options.sessionId, properties, context });
     if (bytes(event) > 32 * 1024) throw new TypeError('Event exceeds 32 KiB');
     if (queue.length + inFlightCount >= maxQueue) { report(new Error('Analytics queue is full; event dropped')); return null; }
     queue.push(event);
@@ -287,7 +306,56 @@ export function createClient(config: AnalyticsOptions, transport?: TransportConf
   if (persistent && typeof window !== 'undefined') window.addEventListener('online', online);
   if (enabled) { restore(); schedule(); } else { clearStored(); clearIdentity(); }
   startNavigation();
+  const emittedForms = new Set<string>();
+  function createForm(formOptions: { endpoint: string }): AnalyticsForm {
+    if (serverMode) throw new Error('Forms are available only on the browser client');
+    const formUrl = new URL(formOptions.endpoint);
+    const match = /^\/v1\/forms\/(form_[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/i.exec(formUrl.pathname);
+    if (!['http:', 'https:'].includes(formUrl.protocol) || formUrl.username || formUrl.password || formUrl.search || formUrl.hash || !match) throw new TypeError('Form endpoint must be an HTTP(S) /v1/forms/form_<uuid> URL');
+    const formId = match[1]!;
+    return { async submit(fields, options = {}) {
+      if (destroyed) throw new Error('Analytics client is destroyed');
+      if (!fields || typeof fields !== 'object' || Array.isArray(fields)) throw new TypeError('Form fields must be a JSON object');
+      validateJson(fields);
+      if (Object.keys(fields).some(key => key.length > 200)) throw new TypeError('Form field keys must be at most 200 characters');
+      const submissionId = options.submissionId ?? globalThis.crypto.randomUUID();
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(submissionId)) throw new TypeError('submissionId must be a UUID');
+      const epoch = generation;
+      let snapshot: TrackOptions | undefined;
+      if (enabled) {
+        validateFields('form_submitted', {}, options);
+        const merged = mergeContext((config.autoTrack || config.fullContext) ? browserContext(config.fullContext ?? false) : undefined, defaultContext, options.context);
+        const context = formContext(merged);
+        snapshot = JSON.parse(JSON.stringify({ anonymousId: options.anonymousId ?? getAnonymousId(), userId: options.userId, sessionId: options.sessionId, context })) as TrackOptions;
+        validateFields('form_submitted', {}, snapshot);
+      }
+      const payload = { fields, metadata: snapshot ? { submission_id: submissionId, source_key: sourceKey, anonymous_id: snapshot.anonymousId, user_id: snapshot.userId, session_id: snapshot.sessionId, context: snapshot.context } : { submission_id: submissionId } };
+      const body = JSON.stringify(payload);
+      let count = 0;
+      const limits = (value: unknown, depth: number): boolean => { if (depth > 10 || ++count > 500) return false; return value === null || typeof value !== 'object' || Object.values(value).every(item => limits(item, depth + 1)); };
+      if (!limits(JSON.parse(body), 0)) throw new TypeError('Form exceeds JSON depth or value limit');
+      if (bytes(body) > 64 * 1024) throw new TypeError('Form exceeds 64 KiB');
+      const abort = new AbortController();
+      let reason = 'Form request aborted';
+      const onAbort = () => abort.abort();
+      if (options.signal?.aborted) abort.abort(); else options.signal?.addEventListener('abort', onAbort, { once: true });
+      const handle = setTimeout(() => { reason = 'Form request timed out'; abort.abort(); }, timeout);
+      try {
+        const aborted = new Promise<never>((_, reject) => { if (abort.signal.aborted) reject(new Error(reason)); else abort.signal.addEventListener('abort', () => reject(new Error(reason)), { once: true }); });
+        const response = await Promise.race([fetcher!(formUrl.href, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body, credentials: 'omit', mode: 'cors', redirect: 'error', signal: abort.signal }), aborted]);
+        let data: unknown;
+        try { data = await Promise.race([response.json(), aborted]); } catch (error) { if (abort.signal.aborted) throw error; throw new Error(`Invalid form response (${response.status})`); }
+        if (!response.ok) { const message = data && typeof data === 'object' && 'error' in data && typeof data.error === 'string' ? data.error : 'Form submission failed'; throw new Error(`Form submission failed (${response.status}): ${message}`); }
+        if ((response.status !== 200 && response.status !== 201) || !data || typeof data !== 'object' || !('submissionId' in data) || data.submissionId !== submissionId || !('formId' in data) || data.formId !== formId || !('redirectUrl' in data) || (data.redirectUrl !== null && typeof data.redirectUrl !== 'string')) throw new Error('Invalid form response');
+        if (snapshot && enabled && !destroyed && generation === epoch && !emittedForms.has(`${formId}:${submissionId}`)) {
+          try { if (track('form_submitted', { form_id: formId, submission_id: submissionId }, snapshot, true)) { emittedForms.add(`${formId}:${submissionId}`); if (emittedForms.size > 1000) emittedForms.delete(emittedForms.values().next().value!); } } catch (error) { report(error); }
+        }
+        return data as FormResult;
+      } finally { clearTimeout(handle); options.signal?.removeEventListener('abort', onAbort); }
+    } };
+  }
   return {
+    createForm,
     track,
     page,
     flush,

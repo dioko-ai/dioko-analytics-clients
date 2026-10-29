@@ -1,7 +1,7 @@
 import { createClient, type AnalyticsOptions, type Analytics } from './internal.js';
 export type { JsonValue, Properties, EventContext, TrackOptions } from './internal.js';
 export interface ServerAnalyticsOptions extends Omit<AnalyticsOptions, 'sourceKey' | 'storage' | 'storageKey' | 'retentionMs' | 'autoTrack' | 'autoAnonymousId' | 'fullContext'> { secretKey: string }
-export interface ServerAnalytics extends Omit<Analytics, 'page'> { shutdown(): Promise<void> }
+export interface ServerAnalytics extends Omit<Analytics, 'page' | 'createForm'> { shutdown(): Promise<void> }
 /** Server-only entry point. Never expose the secret key in browser bundles. */
 export function createServerAnalytics(options: ServerAnalyticsOptions): ServerAnalytics {
   if (typeof window !== 'undefined') throw new Error('Server analytics cannot run in a browser');
